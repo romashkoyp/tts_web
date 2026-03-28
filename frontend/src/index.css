@@ -1,0 +1,143 @@
+/* ── Design System ───────────────────────────────── */
+:root {
+  /* Colors */
+  --bg:            hsl(220 20% 8%);
+  --bg-gradient:   linear-gradient(145deg, hsl(220 20% 8%) 0%, hsl(230 22% 11%) 50%, hsl(220 20% 8%) 100%);
+  --surface:       hsl(220 18% 12%);
+  --surface-hover: hsl(220 18% 15%);
+  --border:        hsl(220 15% 18%);
+  --border-focus:  hsl(160 70% 50% / 0.4);
+
+  --accent:        hsl(160 70% 50%);
+  --accent-dim:    hsl(160 60% 38%);
+  --accent-glow:   hsl(160 70% 50% / 0.15);
+  --accent-text:   hsl(160 70% 70%);
+
+  --text:          hsl(210 20% 88%);
+  --text-muted:    hsl(210 15% 55%);
+  --text-dim:      hsl(210 10% 40%);
+
+  --error:         hsl(0 70% 60%);
+  --error-bg:      hsl(0 70% 60% / 0.1);
+  --warning:       hsl(40 90% 60%);
+
+  /* Typography */
+  --font-heading:  'Playfair Display', Georgia, serif;
+  --font-body:     'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Spacing */
+  --radius-sm:     6px;
+  --radius-md:     12px;
+  --radius-lg:     20px;
+
+  /* Transitions */
+  --ease-out:      cubic-bezier(0.22, 1, 0.36, 1);
+  --duration:      0.3s;
+}
+
+/* ── Reset & Base ───────────────────────────────── */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  font-weight: 300;
+  color: var(--text);
+  background: var(--bg);
+  background-image: var(--bg-gradient);
+  min-height: 100vh;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Subtle dot grid overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: radial-gradient(circle, hsl(160 70% 50% / 0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ── Utility: Glass Card ────────────────────────── */
+.glass-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(12px);
+  box-shadow:
+    0 4px 24px hsl(0 0% 0% / 0.3),
+    inset 0 1px 0 hsl(0 0% 100% / 0.03);
+}
+
+/* ── Animations ─────────────────────────────────── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-12px); max-height: 0; }
+  to   { opacity: 1; transform: translateY(0); max-height: 200px; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { text-shadow: 0 0 20px hsl(160 70% 50% / 0.2); }
+  50%      { text-shadow: 0 0 40px hsl(160 70% 50% / 0.4), 0 0 60px hsl(160 70% 50% / 0.15); }
+}
+
+@keyframes progress-stripe {
+  0%   { background-position: 0 0; }
+  100% { background-position: 40px 0; }
+}
+
+@keyframes shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-in {
+  animation: fadeInUp 0.5s var(--ease-out) both;
+}
+
+/* ── Scrollbar ──────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}
+
+/* ── Selection ──────────────────────────────────── */
+::selection {
+  background: hsl(160 70% 50% / 0.25);
+  color: var(--text);
+}

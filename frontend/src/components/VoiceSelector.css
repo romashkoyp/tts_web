@@ -1,0 +1,73 @@
+.voice-selector {
+  opacity: 0;
+  transform: translateY(-8px);
+  max-height: 0;
+  overflow: hidden;
+  transition: all 0.4s var(--ease-out);
+}
+
+.voice-selector--visible {
+  opacity: 1;
+  transform: translateY(0);
+  max-height: 120px;
+  overflow: visible;
+}
+
+.voice-selector__label {
+  display: block;
+  font-family: var(--font-heading);
+  font-size: 1rem;
+  font-weight: 400;
+  color: var(--text);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.02em;
+}
+
+.voice-selector__control {
+  position: relative;
+  display: inline-block;
+  min-width: 220px;
+}
+
+.voice-selector__select {
+  width: 100%;
+  padding: 0.7rem 2.5rem 0.7rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: hsl(220 20% 10%);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 400;
+  appearance: none;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--duration) var(--ease-out),
+              box-shadow var(--duration) var(--ease-out);
+}
+
+.voice-selector__select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.voice-selector__select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.voice-selector__arrow {
+  position: absolute;
+  right: 1rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+
+/* Style option dropdown */
+.voice-selector__select option {
+  background: var(--surface);
+  color: var(--text);
+}

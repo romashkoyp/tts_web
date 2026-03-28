@@ -1,0 +1,22 @@
+.footer {
+  margin-top: auto;
+  padding: 2rem 0 1.5rem;
+  text-align: center;
+}
+
+.footer__text {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+}
+
+.footer__link {
+  color: var(--accent-text);
+  text-decoration: none;
+  transition: color var(--duration) var(--ease-out);
+}
+
+.footer__link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}

@@ -1,0 +1,50 @@
+.header {
+  padding: 2.5rem 0 1.5rem;
+  text-align: center;
+}
+
+.header__inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.header__icon {
+  flex-shrink: 0;
+}
+
+.header__svg {
+  width: 40px;
+  height: 40px;
+  color: var(--accent);
+  filter: drop-shadow(0 0 8px var(--accent-glow));
+}
+
+.header__title {
+  font-family: var(--font-heading);
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  animation: pulse-glow 4s ease-in-out infinite;
+}
+
+.header__subtitle {
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 300;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+  letter-spacing: 0.04em;
+}
+
+@media (max-width: 480px) {
+  .header__title {
+    font-size: 1.5rem;
+  }
+  .header__svg {
+    width: 32px;
+    height: 32px;
+  }
+}

@@ -1,0 +1,43 @@
+.download {
+  text-align: center;
+}
+
+.download__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 2rem;
+  border: none;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--accent-dim), var(--accent));
+  color: hsl(220 20% 8%);
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform var(--duration) var(--ease-out),
+              box-shadow var(--duration) var(--ease-out);
+  letter-spacing: 0.02em;
+}
+
+.download__button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px hsl(160 70% 50% / 0.3),
+              0 0 0 1px hsl(160 70% 50% / 0.2);
+}
+
+.download__button:active {
+  transform: translateY(0);
+}
+
+.download__icon {
+  width: 18px;
+  height: 18px;
+}
+
+.download__hint {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
