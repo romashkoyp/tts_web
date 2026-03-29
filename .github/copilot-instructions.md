@@ -20,7 +20,7 @@ The backend is a FastAPI service that processes text-to-speech generation using 
 
 ### 3.1 Input
 - User can provide source text by pasting text into a textarea.
-- App validates that text is not empty and does not exceed a reasonable size (e.g., 5 megabytes) or equal length.
+- App validates that text is not empty and does not exceed 46 kilobytes (46 KB).
 
 ### 3.2 Voice and Language Selection
 - App detects language from provided text.

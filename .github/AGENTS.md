@@ -128,7 +128,7 @@ tts_web/
 
 2. **Update form validation:**
    - Edit input handling in [App.tsx](../frontend/src/App.tsx)
-   - Enforce 5MB max size and non-empty validation per spec
+   - Enforce 46KB max size and non-empty validation per spec
 
 3. **Modify API client:**
    - Edit endpoints in [frontend/src/services/api.ts](../frontend/src/services/api.ts)
@@ -210,7 +210,7 @@ See [copilot-instructions.md § 6](./copilot-instructions.md#6-api-contract-init
 ### POST /api/tts
 ```
 Request:
-  - text (string, max 5MB)
+   - text (string, max 46KB)
    - voice_name (string, edge-tts ShortName)
 
 Response:
@@ -267,7 +267,7 @@ These early-stage scripts are reference implementations. Integrate their logic i
 - **Async processing:** Use `asyncio` + `concurrent.futures` for parallel chunk processing (edge-tts has no native async support per the prototype)
 - **Single MP3 output:** Always merge chunks into one file for user simplicity
 - **Chunking strategy:** Split by sentence/word boundaries to preserve context
-- **Validation:** Validate input text for length (not null or empty) and total size (max 5MB). Enforce server-side via validate.js middleware
+- **Validation:** Validate input text for length (not null or empty) and total size (max 46KB). Enforce server-side in FastAPI validation logic
 
 ### Frontend Patterns
 - **Textarea input:** Simple, no rich editor initially

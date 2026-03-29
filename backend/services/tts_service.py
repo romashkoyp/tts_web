@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 WORDS_PER_MINUTE = 150
-MAX_WORDS_PER_CHUNK = WORDS_PER_MINUTE * 8  # ~1200 words per chunk
+MAX_WORDS_PER_CHUNK = WORDS_PER_MINUTE * 4  # ~600 words per chunk
 
 # Reduced concurrency: Microsoft's servers are sensitive to too many 
 # simultaneous connections (often resulting in 503 errors).

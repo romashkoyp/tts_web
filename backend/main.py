@@ -75,7 +75,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Request / response models
 # ---------------------------------------------------------------------------
 
-MAX_TEXT_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_TEXT_BYTES = 46 * 1024  # 46 KB
 
 class TTSRequest(BaseModel):
     """Body for POST /api/tts."""
@@ -129,7 +129,7 @@ async def text_to_speech(body: TTSRequest):
     if len(body.text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise HTTPException(
             status_code=400,
-            detail=f"Text exceeds maximum allowed size of {MAX_TEXT_BYTES // (1024 * 1024)} MB.",
+            detail=f"Text exceeds maximum allowed size of {MAX_TEXT_BYTES // 1024} KB.",
         )
 
     temp_dir = tempfile.mkdtemp(prefix="tts_chunks_")

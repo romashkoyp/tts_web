@@ -36,7 +36,7 @@ interface TextInputProps {
   value?: string;
 }
 
-const MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const MAX_BYTES = 46 * 1024; // 46 KB
 
 export default function TextInput({ onTextChange, onLanguageDetected, disabled, value }: TextInputProps) {
   const [text, setText] = useState('');
@@ -74,7 +74,7 @@ export default function TextInput({ onTextChange, onLanguageDetected, disabled, 
     const bytes = new TextEncoder().encode(val).length;
 
     if (bytes > MAX_BYTES) {
-      setError('Text exceeds 5 MB limit');
+      setError('Text exceeds 46 KB limit');
       return;
     }
 
