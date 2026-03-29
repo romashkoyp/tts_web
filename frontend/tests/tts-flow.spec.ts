@@ -235,4 +235,19 @@ test.describe('TTS Web Frontend Flow', () => {
     await expect(detectBtn).toBeHidden();
   });
 
+  test('9. Clear button is visible and active when input has text', async ({ page }) => {
+    const textarea = page.locator('textarea#tts-text-input');
+    const clearBtn = page.locator('button#clear-button');
+
+    await expect(clearBtn).toBeHidden();
+
+    await textarea.fill('Any text');
+    await expect(clearBtn).toBeVisible();
+    await expect(clearBtn).toBeEnabled();
+
+    await clearBtn.click();
+    await expect(textarea).toHaveValue('');
+    await expect(clearBtn).toBeHidden();
+  });
+
 });

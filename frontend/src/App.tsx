@@ -134,7 +134,7 @@ export default function App() {
   const showSubmit = state === 'detected';
   const showProgress = state === 'generating';
   const showDownload = state === 'done' && audioBlob;
-  const showClear = state === 'generating' || state === 'done';
+  const showClear = text.length > 0;
 
   return (
     <>
