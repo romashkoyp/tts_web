@@ -165,7 +165,7 @@ export default function App() {
             </div>
           )}
 
-          <div className="card__actions animate-in" style={{ animationDelay: '0.15s', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+          <div className="card__actions animate-in" style={{ animationDelay: '0.15s' }}>
             {showSubmit && (
               <button
                 id="generate-button"

@@ -20,6 +20,10 @@
 .card__actions {
   margin-top: 1.75rem;
   text-align: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 .card__error {
@@ -105,8 +109,23 @@
     padding: 1.5rem 1.25rem;
   }
 
+  .main {
+    padding-left: 0.9rem;
+    padding-right: 0.9rem;
+  }
+
   .btn-primary {
     width: 100%;
     justify-content: center;
+  }
+
+  .card__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .btn-secondary {
+    width: 100%;
+    text-align: center;
   }
 }
