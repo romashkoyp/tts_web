@@ -60,6 +60,15 @@ Deploy separately:
 - System package `ffmpeg` installed in the Docker image.
 - CORS configured if frontend and backend are split into separate services.
 
+### 5.3 Deployment Automation Baseline
+- Release branch is `main`.
+- CI/CD uses separate GitHub Actions workflows for backend and frontend.
+- Each workflow runs checks first, then optionally triggers Render deploy hooks.
+- Deploy hooks are configured via repository secrets:
+	- `RENDER_BACKEND_DEPLOY_HOOK`
+	- `RENDER_FRONTEND_DEPLOY_HOOK`
+- If deploy hook secrets are missing, validation checks still run and deploy jobs are skipped.
+
 ## 6. API Contract (Initial Draft)
 - `POST /api/tts`
 	- Input: text payload + selected variation option.

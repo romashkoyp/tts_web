@@ -1,11 +1,11 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 // Utility to create a tiny fake MP3 blob so decoding doesn't throw a format error
 // A valid empty ID3 metadata MP3 will do, but a text blob is fine if the code handles decode failure.
 // actually, let's inject a valid minimal base64 mp3:
 const minimalMp3Base64 = "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU5LjI3LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIwBRUVFRUVFRUVFRUVFRUVFRUVFRUVFRVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmbm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5uqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqru7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7/8AAAAATGF2YzU5LjM3AAAAAAAAAAAAAAAAJAAAAAAAAAAAASO5oRygAAAAAP/zBAxA";
 
-async function mockDetectLanguage(page: any) {
+async function mockDetectLanguage(page: Page) {
   await page.route('/api/detect-language', async (route) => {
     await route.fulfill({
       status: 200,
@@ -15,7 +15,7 @@ async function mockDetectLanguage(page: any) {
   });
 }
 
-async function mockVoices(page: any) {
+async function mockVoices(page: Page) {
   await page.route('/api/voices*', async (route) => {
     await route.fulfill({
       status: 200,
@@ -31,16 +31,17 @@ async function mockVoices(page: any) {
   });
 }
 
-async function mockTTS(page: any, delayMs = 0) {
+async function mockTTS(page: Page, delayMs = 0) {
   await page.route('/api/tts', async (route) => {
     if (delayMs > 0) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
-    const buffer = Buffer.from(minimalMp3Base64, 'base64');
+    const binary = atob(minimalMp3Base64);
+    const body = Uint8Array.from(binary, (char) => char.charCodeAt(0));
     await route.fulfill({
       status: 200,
       contentType: 'audio/mpeg',
-      body: buffer,
+      body,
     });
   });
 }
@@ -50,13 +51,13 @@ test.describe('TTS Web Frontend Flow', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
       // Mock AudioContext to always return a duration of 120 seconds (02:00)
-      (window as any).AudioContext = class {
+      (window as unknown as { AudioContext: typeof AudioContext }).AudioContext = class {
         decodeAudioData() {
           return Promise.resolve({ duration: 120 });
         }
         close() {}
-      };
-      (window as any).webkitAudioContext = (window as any).AudioContext;
+      } as unknown as typeof AudioContext;
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext = (window as unknown as { AudioContext: typeof AudioContext }).AudioContext;
     });
 
     await mockDetectLanguage(page);

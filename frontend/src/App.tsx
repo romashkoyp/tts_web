@@ -47,7 +47,8 @@ export default function App() {
     }
   }, [state]);
 
-  const handleLanguageDetected = useCallback(async (locale: string, _name: string) => {
+  const handleLanguageDetected = useCallback(async (locale: string, langName: string) => {
+    void langName;
     setError('');
     setSelectedVoice('');
 
@@ -98,8 +99,8 @@ export default function App() {
       
       setAudioBlob(blob);
       setState('done');
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
+    } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
         // Silently ignore if it was manually cancelled
       } else {
         setError('Generation failed. Please try again.');

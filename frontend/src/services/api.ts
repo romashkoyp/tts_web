@@ -1,8 +1,17 @@
 /**
  * API Service — real backend integration.
  *
- * All calls go through the Vite dev proxy (/api → localhost:8000).
+ * Local dev: calls go through the Vite proxy (/api -> localhost:8000).
+ * Production: set VITE_API_URL so requests go to the Render backend URL.
  */
+
+const RAW_API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.trim() ?? '';
+const API_BASE = RAW_API_BASE.replace(/\/+$/, '');
+
+function apiUrl(path: string): string {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return API_BASE ? `${API_BASE}${normalizedPath}` : normalizedPath;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -22,7 +31,7 @@ export type ProgressCallback = (percent: number, status: string) => void;
  * Returns an edge-tts locale code like "en-US".
  */
 export async function detectLanguage(text: string): Promise<string> {
-  const res = await fetch('/api/detect-language', {
+  const res = await fetch(apiUrl('/api/detect-language'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
@@ -43,7 +52,7 @@ export async function detectLanguage(text: string): Promise<string> {
  * Fetch available voices for a given language locale (e.g. "en-US" or "en").
  */
 export async function getVoices(language: string): Promise<VoiceOption[]> {
-  const res = await fetch(`/api/voices?language=${encodeURIComponent(language)}`);
+  const res = await fetch(apiUrl(`/api/voices?language=${encodeURIComponent(language)}`));
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Failed to load voices' }));
@@ -94,7 +103,7 @@ export async function generateTTS(
   const { stop } = simulateProgress(estimatedSeconds, onProgress);
 
   try {
-    const res = await fetch('/api/tts', {
+    const res = await fetch(apiUrl('/api/tts'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, voice_name: voiceName }),

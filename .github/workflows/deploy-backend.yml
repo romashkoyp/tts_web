@@ -1,4 +1,4 @@
-name: Deploy Backend to Render
+name: Backend CI + Render Deploy
 
 on:
   push:
@@ -6,17 +6,42 @@ on:
       - main
     paths:
       - 'backend/**'
-  workflow_dispatch: # Allows manual trigger from UI
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  checks:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Render Deploy Hook
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run backend tests
+        working-directory: backend
+        run: pytest -q
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: checks
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Trigger Render backend deploy hook
         run: |
           if [ -z "${{ secrets.RENDER_BACKEND_DEPLOY_HOOK }}" ]; then
-            echo "Error: RENDER_BACKEND_DEPLOY_HOOK secret is not set!"
-            exit 1
+            echo "RENDER_BACKEND_DEPLOY_HOOK is not set; skipping deploy trigger."
+            exit 0
           fi
-          echo "Triggering deploy hook..."
-          curl -s -X POST "${{ secrets.RENDER_BACKEND_DEPLOY_HOOK }}" | grep -q 'ok' || echo "Deployment triggered (or no output)."
+          echo "Triggering backend deploy hook"
+          curl -fsS -X POST "${{ secrets.RENDER_BACKEND_DEPLOY_HOOK }}"

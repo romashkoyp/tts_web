@@ -20,10 +20,11 @@ export default function VoiceSelector({ voices, onSelect, disabled }: VoiceSelec
 
   useEffect(() => {
     if (voices.length > 0 && !selected) {
-      setSelected(voices[0].shortName);
       onSelect(voices[0].shortName);
     }
   }, [voices, selected, onSelect]);
+
+  const effectiveSelected = selected || voices[0]?.shortName || '';
 
   function handleChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const val = e.target.value;
@@ -40,7 +41,7 @@ export default function VoiceSelector({ voices, onSelect, disabled }: VoiceSelec
         <select
           id="voice-select"
           className="voice-selector__select"
-          value={selected}
+          value={effectiveSelected}
           onChange={handleChange}
           disabled={disabled}
         >

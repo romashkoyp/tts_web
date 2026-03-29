@@ -11,7 +11,11 @@ export default function DownloadLink({ blob, filename = 'speech.mp3' }: Download
 
   useEffect(() => {
     // Decode audio data to find its precise duration
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const audioContextCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!audioContextCtor) {
+      return;
+    }
+    const audioCtx = new audioContextCtor();
     const reader = new FileReader();
 
     reader.onload = async function() {
@@ -19,10 +23,10 @@ export default function DownloadLink({ blob, filename = 'speech.mp3' }: Download
         const arrayBuffer = reader.result as ArrayBuffer;
         const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
         
-        let seconds = Math.floor(audioBuffer.duration);
-        let hours = Math.floor(seconds / 3600);
-        let minutes = Math.floor((seconds % 3600) / 60);
-        let secs = seconds % 60;
+        const seconds = Math.floor(audioBuffer.duration);
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
         
         if (hours > 0) {
           setDurationStr(`${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);

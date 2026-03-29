@@ -12,7 +12,7 @@ This file provides development workflows, setup instructions, and practical guid
 | **Start backend** | `cd backend && docker build -t tts-backend . && docker run -p 8000:8000 -v "${PWD}:/app" tts-backend` |
 | **Start frontend** | `cd frontend && npm run dev` |
 | **Build for production** | Frontend: `npm run build` • Backend: Docker deployment on Render |
-| **Run tests** | Frontend: `npm test` • Backend: `docker exec -it <container_id> pytest` |
+| **Run checks** | Frontend: `npm run lint && npm run build` • Backend: `python -m pytest -q` |
 
 ---
 
@@ -96,7 +96,7 @@ tts_web/
 
 1. **Modify chunk size or audio parameters:**
    - Edit `MAX_WORDS_PER_FILE` in [tts_service.py](../backend/services/tts_service.py)
-   - The container should auto-reload if passing local files via volume mount `docker run -v "${PWD}:/app" ...`, otherwise rebuild and restart.
+   - Rebuild and restart container to ensure runtime parity with Render.
 
 2. **Add a new voice or language:**
    - Reference: [edge-tts voice list](https://github.com/rany2/edge-tts#--list-voices)
@@ -211,8 +211,7 @@ See [copilot-instructions.md § 6](./copilot-instructions.md#6-api-contract-init
 ```
 Request:
   - text (string, max 5MB)
-  - variation (string, e.g. "male", "female")
-  - language (string, optional; auto-detected if omitted)
+   - voice_name (string, edge-tts ShortName)
 
 Response:
   - 200: audio/mpeg (MP3 file, single merged output)
@@ -225,7 +224,7 @@ Response:
 Query: language (string, e.g. "en-US")
 
 Response:
-  - 200: { variations: ["male", "female"] }
+   - 200: { language: "en-US", voices: [{ short_name, gender, locale }] }
   - 404: Language not supported
 ```
 
@@ -242,8 +241,13 @@ Before deploying to Render.com:
 - [ ] Backend: `.dockerignore` excludes unnecessary files
 - [ ] Environment variables: none hardcoded (use `.env` or Render config)
 - [ ] Tested locally via Docker with frontend & backend both running
+- [ ] Backend workflow passes (`.github/workflows/deploy-backend.yml`)
+- [ ] Frontend workflow passes (`.github/workflows/deploy-frontend.yml`)
+- [ ] Deploy-hook secrets set if automatic deployment is desired:
+   - `RENDER_BACKEND_DEPLOY_HOOK`
+   - `RENDER_FRONTEND_DEPLOY_HOOK`
 
-See [copilot-instructions.md § 5](./copilot-instructions.md#5-deployment-requirements-render) for full deployment spec.
+See [copilot-instructions.md § 5](./copilot-instructions.md#5-deployment-requirements-render) and [deployment.md](../deployment.md) for full deployment steps.
 
 ---
 
@@ -279,35 +283,11 @@ These early-stage scripts are reference implementations. Integrate their logic i
 
 ---
 
-## 9. Next Steps (If Scaffolding Not Yet Done)
+## 9. Operational Next Steps
 
-1. **[Create backend scaffolding](./copilot-instructions.md#7-initial-project-structure)**
-   - Create `backend/` directory structure
-   - Migrate [text_to_speech_edge.py](../text_to_speech_edge.py) → `backend/services/tts_service.py`
-   - Migrate [chunks_to_single_file.py](../chunks_to_single_file.py) → `backend/services/audio_merge.py`
-   - Create `backend/main.py` with FastAPI endpoints
-
-2. **[Create frontend scaffolding](./copilot-instructions.md#7-initial-project-structure)**
-   - Use Vite: `npm create vite@latest frontend -- --template react-ts`
-   - Set up TypeScript, ESLint, Prettier
-   - Create basic layout with textarea, voice selector, submit button
-
-3. **Add tests**
-   - Backend: `pytest` for TTS chunk processing, audio merge
-   - Frontend: `vitest` or Jest for component rendering, API mocking
-   - Integration tests for frontend and backend (Playwright), testcases:
-      - user past text -> appears button `detect language` -> user clicks `detect language` -> POST request to backend with short part of text enough for language detection -> language is detected, selector dropdown visible and active, button `detect language` disappears, button `Generate MP3` appears -> if language is not detected, button `Generate MP3` and language selector remain hidden
-      - after click `Generate MP3` button -> POST request to backend with whole text -> during generation progress bar shows estimated progress according to backend logs, user see real progress, status in the progress bar, time spent in format `mm:ss`
-      - after generation user click `clear` button -> view reset to initial state, user can enter new text and repeat the process
-      - after generation under `Download MP3` button user see the size of the generated audio file in MB and duration in fromat `mm:ss` or `hh:mm:ss` if duration is more than 1 hour
-      - if user click `Generate MP3` button and generation is not completed, user can click `clear` button -> generation stops, view reset to initial state, user can enter new text and repeat the process
-      - the of output mp3 file name is: `long_text_to_speech_{DD.MM.YYYY}_{HH.MM.SS}.mp3`
-      - user past text and then remove it that input field is empty, button `detect language` and button `Generate MP3` should be hidden, these buttons should be hidden until user past at least 5 words in input field
-      - during the language detection user should see that request is processing
-
-4. **Deploy to Render**
-   - Create two services: one for backend, one for frontend
-   - Configure environment, build commands, system dependencies
+1. Keep Render services on manual deploy in Render UI and trigger deploys through GitHub Actions hooks.
+2. Add custom domains later only after baseline `onrender.com` deployments are stable.
+3. Expand automated tests over time (backend unit tests + frontend integration coverage).
 
 ---
 
@@ -322,4 +302,4 @@ Example: *"Add language detection to the React form. Frontend should send detect
 
 ---
 
-**Last updated:** March 2026 | **Status:** Development scaffolding in progress
+**Last updated:** March 2026 | **Status:** Deployment-ready baseline configured for Render

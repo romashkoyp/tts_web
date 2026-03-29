@@ -25,7 +25,6 @@ COPY . .
 # Expose the application port
 EXPOSE 8000
 
-# Run the FastAPI server with uvicorn
-# --host 0.0.0.0 : bind to all interfaces (required for Docker)
-# --reload       : auto-reload on code changes (works with volume mounts)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Run the FastAPI server in production mode.
+# Render provides PORT at runtime; fallback to 8000 for local container runs.
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
