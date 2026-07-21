@@ -1,11 +1,47 @@
 """
-Unit tests for tts_service — text chunking and language detection.
+Unit tests for tts_service — text chunking, chunk validation, and language detection.
 
 These tests do NOT make network calls; they test pure logic only.
 """
 
+import os
+import tempfile
 import pytest
-from services.tts_service import split_text_into_chunks, detect_language
+from services.tts_service import (
+    split_text_into_chunks,
+    detect_language,
+    is_valid_chunk,
+    MIN_FILE_SIZE,
+)
+
+
+# ---------------------------------------------------------------------------
+# is_valid_chunk
+# ---------------------------------------------------------------------------
+
+class TestIsValidChunk:
+    """Tests for chunk file validation."""
+
+    def test_nonexistent_file_returns_false(self):
+        assert is_valid_chunk("nonexistent_chunk_9999.mp3") is False
+
+    def test_empty_or_small_file_returns_false(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            f.write(b"12345")  # only 5 bytes < MIN_FILE_SIZE
+            tmp_path = f.name
+        try:
+            assert is_valid_chunk(tmp_path) is False
+        finally:
+            os.remove(tmp_path)
+
+    def test_valid_file_returns_true(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            f.write(b"x" * (MIN_FILE_SIZE + 10))
+            tmp_path = f.name
+        try:
+            assert is_valid_chunk(tmp_path) is True
+        finally:
+            os.remove(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -28,37 +64,39 @@ class TestSplitTextIntoChunks:
         assert chunks[0] == text.strip()
 
     def test_splits_at_sentence_boundary(self):
-        # Two sentences: 3 words + 4 words = 7. With max_words=4, they
-        # should be in separate chunks.
         text = "Hello world now. This is another sentence."
         chunks = split_text_into_chunks(text, max_words=4)
         assert len(chunks) == 2
         assert chunks[0] == "Hello world now."
         assert chunks[1] == "This is another sentence."
 
+    def test_paragraph_breaks_and_formatting(self):
+        text = "First paragraph sentence.\n\nSecond paragraph sentence."
+        chunks = split_text_into_chunks(text, max_words=3)
+        assert len(chunks) == 2
+        assert chunks[0] == "First paragraph sentence."
+        assert chunks[1] == "Second paragraph sentence."
+
+    def test_splits_oversized_sentence_by_clauses(self):
+        text = "This is clause one, and this is clause two, while this is clause three."
+        # Limit to 5 words per chunk, so clauses will be grouped/split
+        chunks = split_text_into_chunks(text, max_words=5)
+        assert len(chunks) > 1
+        assert "This is clause one," in chunks[0]
+
+    def test_cyrillic_multilingual_sentence_boundaries(self):
+        text = "Привет мир! Это предложение на русском языке. «Цитирование текста» работает."
+        chunks = split_text_into_chunks(text, max_words=6)
+        assert len(chunks) == 3
+        assert chunks[0] == "Привет мир!"
+        assert chunks[1] == "Это предложение на русском языке."
+        assert chunks[2] == "«Цитирование текста» работает."
+
     def test_long_text_multiple_chunks(self):
-        # Generate text with many sentences
         sentences = [f"Sentence number {i} is here." for i in range(50)]
         text = " ".join(sentences)
         chunks = split_text_into_chunks(text, max_words=20)
         assert len(chunks) > 1
-        # Recombined text should be equivalent
-        recombined = " ".join(chunks)
-        assert recombined == text
-
-    def test_single_long_sentence_exceeds_max(self):
-        # A single sentence longer than max_words should still produce one
-        # chunk (we don't split mid-sentence).
-        words = " ".join(["word"] * 50)
-        text = f"{words}."
-        chunks = split_text_into_chunks(text, max_words=10)
-        # The single sentence exceeds limit, but since there's nothing in
-        # the current chunk when it's encountered, it gets added as one chunk.
-        assert len(chunks) == 1
-
-    def test_preserves_all_text(self):
-        text = "First sentence. Second sentence! Third sentence? Fourth."
-        chunks = split_text_into_chunks(text, max_words=5)
         recombined = " ".join(chunks)
         assert recombined == text
 
@@ -95,10 +133,9 @@ class TestDetectLanguage:
             detect_language("")
 
     def test_nonsense_short_text_raises_or_detects(self):
-        # Very short nonsense — detection might fail or return something.
-        # We just ensure it doesn't crash unexpectedly.
         try:
             result = detect_language("xyz")
             assert isinstance(result, str)
         except ValueError:
-            pass  # acceptable — too short to detect
+            pass
+

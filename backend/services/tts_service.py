@@ -1,7 +1,7 @@
 """
 TTS Service — text chunking, edge-tts orchestration, language detection, voice listing.
 
-Adapted from the prototype script text_to_speech_edge.py.
+Adapted from audiobook.py.
 """
 
 import re
@@ -19,18 +19,13 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 WORDS_PER_MINUTE = 150
-MAX_WORDS_PER_CHUNK = WORDS_PER_MINUTE * 4  # ~600 words per chunk
+MAX_WORDS_PER_CHUNK = WORDS_PER_MINUTE * 8  # ~1200 words per chunk
+MIN_FILE_SIZE = 1024  # bytes — valid MP3 is at least ~1 KB
 
-# Reduced concurrency: Microsoft's servers are sensitive to too many 
-# simultaneous connections (often resulting in 503 errors).
 MAX_WORKERS = 20
 MAX_RETRIES = 3
-RETRY_DELAY_BASE = 2  # seconds
 
 # Mapping from langdetect 2-letter codes to common edge-tts locale prefixes.
-# edge-tts uses locale codes like "en-US", "ru-RU", "fi-FI", etc.
-# When the detected language doesn't have an exact match, we fall back to
-# the most common regional variant.
 LANGUAGE_TO_LOCALE: dict[str, str] = {
     "af": "af-ZA",
     "ar": "ar-SA",
@@ -104,6 +99,15 @@ LANGUAGE_TO_LOCALE: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Utilities & Validation
+# ---------------------------------------------------------------------------
+
+def is_valid_chunk(filepath: str) -> bool:
+    """Check that an MP3 file exists and is not empty/corrupted (>= 1 KB)."""
+    return os.path.isfile(filepath) and os.path.getsize(filepath) >= MIN_FILE_SIZE
+
+
+# ---------------------------------------------------------------------------
 # Language detection
 # ---------------------------------------------------------------------------
 
@@ -115,16 +119,13 @@ def detect_language(text: str) -> str:
     Raises ValueError if detection fails.
     """
     try:
-        # langdetect returns ISO-639-1 codes like "en", "ru", "fi", etc.
         lang_code = detect(text).lower()
     except LangDetectException as exc:
         raise ValueError(f"Could not detect language: {exc}") from exc
 
-    # Direct mapping
     if lang_code in LANGUAGE_TO_LOCALE:
         return LANGUAGE_TO_LOCALE[lang_code]
 
-    # Try prefix match (e.g. "zh-cn" → "zh-CN")
     for key, locale in LANGUAGE_TO_LOCALE.items():
         if key.startswith(lang_code):
             return locale
@@ -141,17 +142,9 @@ def detect_language(text: str) -> str:
 async def get_voices_for_language(language: str) -> list[dict]:
     """
     Return available edge-tts voices for a given language code.
-
-    *language* can be either:
-      - a 2-letter code like "en" (we expand to "en-" prefix match), or
-      - a full locale like "en-US" (exact prefix match).
-
-    Returns a list of dicts:
-        [{ "short_name": "en-US-GuyNeural", "gender": "Male", "locale": "en-US" }, ...]
     """
     all_voices = await edge_tts.list_voices()
 
-    # Normalise the search prefix
     lang_lower = language.lower()
     if len(lang_lower) == 2:
         prefix = f"{lang_lower}-"
@@ -181,32 +174,72 @@ def split_text_into_chunks(
     text: str, max_words: int = MAX_WORDS_PER_CHUNK
 ) -> list[str]:
     """
-    Split *text* into chunks of at most *max_words* words, preserving
-    sentence boundaries where possible.
+    Split *text* into chunks of ~max_words, preserving structure without cutting mid-sentence.
+
+    Universal split hierarchy:
+      1. Paragraph breaks (double newlines)
+      2. Sentence endings (.!?...) followed by uppercase / quote / dash / bracket
+      3. Clause boundaries (; , — –) for oversized sentences
+      4. Word boundaries (last resort)
     """
     if not text or not text.strip():
         return []
 
-    # Split on sentence-ending punctuation followed by whitespace
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    def wc(s: str) -> int:
+        return len(s.split())
+
+    def split_sentences(paragraph: str) -> list[str]:
+        p = paragraph.replace("...", "\u2026")
+        parts = re.split(r"(?<=[.!?\u2026])\s+(?=[^\s\da-z])", p)
+        return [s.strip() for s in parts if s.strip()]
+
+    def split_oversized(sentence: str, limit: int) -> list[str]:
+        clauses = re.split(r"(?<=[;,])\s+|\s+(?=[—–]\s)", sentence)
+        if len(clauses) > 1:
+            parts, buf, n = [], [], 0
+            for cl in clauses:
+                cw = wc(cl)
+                if n + cw > limit and buf:
+                    parts.append(" ".join(buf))
+                    buf, n = [cl], cw
+                else:
+                    buf.append(cl)
+                    n += cw
+            if buf:
+                parts.append(" ".join(buf))
+            return parts
+        words = sentence.split()
+        return [" ".join(words[i : i + limit]) for i in range(0, len(words), limit)]
+
+    paragraphs = re.split(r"\n\s*\n", text.replace("\r\n", "\n"))
+    sentences: list[str] = []
+    for para in paragraphs:
+        para_clean = " ".join(para.split())
+        if para_clean:
+            sentences.extend(split_sentences(para_clean))
 
     chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_word_count = 0
+    chunk: list[str] = []
+    count = 0
 
-    for sentence in sentences:
-        sentence_words = len(sentence.split())
-
-        if current_word_count + sentence_words > max_words and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = [sentence]
-            current_word_count = sentence_words
+    for sent in sentences:
+        sw = wc(sent)
+        if sw > max_words:
+            if chunk:
+                chunks.append(" ".join(chunk))
+                chunk, count = [], 0
+            chunks.extend(split_oversized(sent, max_words))
+            continue
+        if count + sw > max_words:
+            if chunk:
+                chunks.append(" ".join(chunk))
+            chunk, count = [sent], sw
         else:
-            current_chunk.append(sentence)
-            current_word_count += sentence_words
+            chunk.append(sent)
+            count += sw
 
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
+    if chunk:
+        chunks.append(" ".join(chunk))
 
     logger.info("Split text into %d chunk(s)", len(chunks))
     return chunks
@@ -223,34 +256,58 @@ async def _generate_chunk(
     output_dir: str,
     total_chunks: int,
 ) -> str:
-    """Generate a single chunk MP3 with exponential backoff retries."""
+    """Generate a single chunk MP3 with retry and validation."""
     output_path = os.path.join(output_dir, f"chunk_{index:04d}.mp3")
-    
-    for attempt in range(MAX_RETRIES):
+    last_error = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            logger.info("Generating chunk %d/%d (Attempt %d/%d) …", 
-                        index + 1, total_chunks, attempt + 1, MAX_RETRIES)
-            
+            logger.info(
+                "Generating chunk %d/%d (Attempt %d/%d) …",
+                index + 1,
+                total_chunks,
+                attempt,
+                MAX_RETRIES,
+            )
+
             communicate = edge_tts.Communicate(text, voice)
             await communicate.save(output_path)
-            
-            logger.info("Chunk %d/%d saved: %s", index + 1, total_chunks, output_path)
-            return output_path
-            
+
+            if is_valid_chunk(output_path):
+                logger.info("Chunk %d/%d saved: %s", index + 1, total_chunks, output_path)
+                return output_path
+
+            size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
+            raise RuntimeError(f"Output file too small ({size} bytes)")
+
         except Exception as exc:
-            if attempt < MAX_RETRIES - 1:
-                wait_time = RETRY_DELAY_BASE * (2 ** attempt)
+            last_error = exc
+            if os.path.isfile(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            if attempt < MAX_RETRIES:
+                wait_time = 2**attempt
                 logger.warning(
                     "Error generating chunk %d/%d: %s. Retrying in %ds…",
-                    index + 1, total_chunks, str(exc), wait_time
+                    index + 1,
+                    total_chunks,
+                    str(exc),
+                    wait_time,
                 )
                 await asyncio.sleep(wait_time)
-            else:
-                logger.error("Failed to generate chunk %d/%d after %d attempts.", 
-                             index + 1, total_chunks, MAX_RETRIES)
-                raise exc
 
-    return output_path
+    logger.error(
+        "Failed to generate chunk %d/%d after %d attempts: %s",
+        index + 1,
+        total_chunks,
+        MAX_RETRIES,
+        last_error,
+    )
+    raise RuntimeError(
+        f"Chunk {index + 1} failed after {MAX_RETRIES} attempts: {last_error}"
+    )
 
 
 def _run_chunk_sync(
@@ -276,9 +333,6 @@ async def process_text_to_speech(
       1. Split *text* into chunks.
       2. Generate audio for each chunk concurrently using a thread pool.
       3. Return ordered list of chunk file paths.
-
-    *voice* is an edge-tts ShortName like "en-US-GuyNeural".
-    *temp_dir* is a writable directory for intermediate chunk files.
     """
     chunks = split_text_into_chunks(text)
     if not chunks:
@@ -298,9 +352,9 @@ async def process_text_to_speech(
                 temp_dir,
                 total,
             )
-            for i, chunk in enumerate(chunks)
+            for i in range(total)
         ]
         paths = await asyncio.gather(*futures)
 
-    # Return in correct order (enumerate already provides ordering)
     return list(paths)
+
