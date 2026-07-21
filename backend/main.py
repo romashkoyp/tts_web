@@ -6,6 +6,9 @@ Endpoints:
   GET  /api/voices  — List available voices for a given language.
 """
 
+import json
+import base64
+import asyncio
 import logging
 import os
 import shutil
@@ -114,16 +117,20 @@ class LanguageDetectionResponse(BaseModel):
 @app.post(
     "/api/tts",
     response_class=StreamingResponse,
-    summary="Convert text to MP3",
+    summary="Convert text to MP3 with real-time progress streaming",
     responses={
-        200: {"content": {"audio/mpeg": {}}, "description": "Generated MP3 audio."},
+        200: {
+            "content": {"application/x-ndjson": {}},
+            "description": "Stream of JSON progress events followed by final audio payload.",
+        },
         400: {"description": "Invalid input."},
         500: {"description": "TTS or merge failure."},
     },
 )
 async def text_to_speech(body: TTSRequest):
     """
-    Accept text + voice name, generate speech, and return a single MP3.
+    Accept text + voice name, generate speech with real-time progress updates,
+    and return NDJSON stream containing progress events and final base64 MP3.
     """
     # --- Validate size ---
     if len(body.text.encode("utf-8")) > MAX_TEXT_BYTES:
@@ -132,45 +139,62 @@ async def text_to_speech(body: TTSRequest):
             detail=f"Text exceeds maximum allowed size of {MAX_TEXT_BYTES // 1024} KB.",
         )
 
-    temp_dir = tempfile.mkdtemp(prefix="tts_chunks_")
-    try:
-        logger.info(
-            "TTS request — voice=%s, text_length=%d chars",
-            body.voice_name,
-            len(body.text),
-        )
+    async def event_generator():
+        temp_dir = tempfile.mkdtemp(prefix="tts_chunks_")
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
 
-        # 1. Generate chunk audio files
-        chunk_paths = await process_text_to_speech(
-            text=body.text,
-            voice=body.voice_name,
-            temp_dir=temp_dir,
-        )
+        def push_progress(pct: int, status: str):
+            queue.put_nowait({"type": "progress", "percent": pct, "status": status})
 
-        # 2. Merge chunks into single MP3
-        audio_buffer = merge_audio_chunks(chunk_paths)
+        push_progress(5, "Analyzing text…")
 
-        logger.info("Returning merged MP3 (%d bytes)", audio_buffer.getbuffer().nbytes)
+        async def run_pipeline():
+            try:
+                logger.info(
+                    "TTS request — voice=%s, text_length=%d chars",
+                    body.voice_name,
+                    len(body.text),
+                )
 
-        return StreamingResponse(
-            audio_buffer,
-            media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": 'attachment; filename="speech.mp3"',
-            },
-        )
+                chunk_paths = await process_text_to_speech(
+                    text=body.text,
+                    voice=body.voice_name,
+                    temp_dir=temp_dir,
+                    on_progress=push_progress,
+                )
 
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception:
-        logger.exception("TTS processing failed")
-        raise HTTPException(
-            status_code=500,
-            detail="Text-to-speech generation failed. Please try again.",
-        )
-    finally:
-        # Clean up temp chunk files
-        shutil.rmtree(temp_dir, ignore_errors=True)
+                push_progress(92, "Merging audio chunks…")
+                audio_buffer = merge_audio_chunks(chunk_paths)
+
+                audio_bytes = audio_buffer.getvalue()
+                audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+
+                push_progress(100, "Done!")
+                queue.put_nowait({"type": "complete", "audio_base64": audio_b64})
+            except ValueError as exc:
+                queue.put_nowait({"type": "error", "detail": str(exc)})
+            except Exception:
+                logger.exception("TTS processing failed")
+                queue.put_nowait({
+                    "type": "error",
+                    "detail": "Text-to-speech generation failed. Please try again.",
+                })
+            finally:
+                queue.put_nowait(None)
+
+        asyncio.create_task(run_pipeline())
+
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield json.dumps(item) + "\n"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+
 
 
 @app.get(

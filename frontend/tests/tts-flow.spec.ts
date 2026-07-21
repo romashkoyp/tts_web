@@ -34,14 +34,20 @@ async function mockVoices(page: Page) {
 async function mockTTS(page: Page, delayMs = 0) {
   await page.route('/api/tts', async (route) => {
     if (delayMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    const binary = atob(minimalMp3Base64);
-    const body = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const lines =
+      [
+        JSON.stringify({ type: 'progress', percent: 5, status: 'Sending request…' }),
+        JSON.stringify({ type: 'progress', percent: 50, status: 'Generating audio (1/2 chunks)' }),
+        JSON.stringify({ type: 'progress', percent: 100, status: 'Done!' }),
+        JSON.stringify({ type: 'complete', audio_base64: minimalMp3Base64 }),
+      ].join('\n') + '\n';
+
     await route.fulfill({
       status: 200,
-      contentType: 'audio/mpeg',
-      body,
+      contentType: 'application/x-ndjson',
+      body: lines,
     });
   });
 }

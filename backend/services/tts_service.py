@@ -323,38 +323,57 @@ def _run_chunk_sync(
     )
 
 
+from typing import Callable, Any
+
 async def process_text_to_speech(
     text: str,
     voice: str,
     temp_dir: str,
+    on_progress: Callable[[int, str], Any] | None = None,
 ) -> list[str]:
     """
     Full TTS pipeline:
       1. Split *text* into chunks.
       2. Generate audio for each chunk concurrently using a thread pool.
-      3. Return ordered list of chunk file paths.
+      3. Report real-time progress via *on_progress(percent, status)* if provided.
+      4. Return ordered list of chunk file paths.
     """
     chunks = split_text_into_chunks(text)
     if not chunks:
         raise ValueError("No processable text after splitting")
 
     total = len(chunks)
+    if on_progress:
+        on_progress(10, f"Split text into {total} chunk(s)")
+
+    completed = 0
     loop = asyncio.get_running_loop()
 
+    def _done_callback(fut: asyncio.Future) -> None:
+        nonlocal completed
+        completed += 1
+        if on_progress:
+            pct = 10 + int((completed / total) * 80)
+            on_progress(pct, f"Generating audio ({completed}/{total} chunks)")
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [
-            loop.run_in_executor(
+        futures = []
+        for i in range(total):
+            fut = loop.run_in_executor(
                 executor,
                 _run_chunk_sync,
                 i,
-                chunk,
+                chunks[i],
                 voice,
                 temp_dir,
                 total,
             )
-            for i in range(total)
-        ]
+            if on_progress:
+                fut.add_done_callback(_done_callback)
+            futures.append(fut)
+
         paths = await asyncio.gather(*futures)
 
     return list(paths)
+
 

@@ -81,87 +81,74 @@ function formatVoiceDisplay(shortName: string, gender: string): string {
   return `${namePart || shortName} (${gender})`;
 }
 
-// ─── TTS Generation ──────────────────────────────────────────────────
-
-/**
- * Generate TTS audio. Returns an MP3 Blob.
- *
- * Since the backend is synchronous (POST → wait → MP3), we simulate
- * progress updates based on estimated generation time.
- */
 export async function generateTTS(
   text: string,
   voiceName: string,
   onProgress?: ProgressCallback,
   signal?: AbortSignal,
 ): Promise<Blob> {
-  // Estimate total duration based on text length (rough heuristic)
-  const wordCount = text.trim().split(/\s+/).length;
-  const estimatedSeconds = Math.max(3, Math.min(60, wordCount / 50));
+  const res = await fetch(apiUrl('/api/tts'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice_name: voiceName }),
+    signal,
+  });
 
-  // Start simulated progress in the background
-  const { stop } = simulateProgress(estimatedSeconds, onProgress);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'TTS generation failed' }));
+    throw new Error(err.detail || 'TTS generation failed');
+  }
 
-  try {
-    const res = await fetch(apiUrl('/api/tts'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice_name: voiceName }),
-      signal,
-    });
+  if (!res.body) {
+    throw new Error('Response body is missing');
+  }
 
-    stop();
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let audioBase64 = '';
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'TTS generation failed' }));
-      throw new Error(err.detail || 'TTS generation failed');
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      try {
+        const event = JSON.parse(trimmed);
+        if (event.type === 'progress') {
+          onProgress?.(event.percent, event.status);
+        } else if (event.type === 'complete') {
+          audioBase64 = event.audio_base64;
+        } else if (event.type === 'error') {
+          throw new Error(event.detail || 'TTS generation failed');
+        }
+      } catch (e) {
+        if (e instanceof Error) {
+          throw e;
+        }
+      }
     }
-
-    onProgress?.(100, 'Done!');
-    return await res.blob();
-
-  } catch (err) {
-    stop();
-    throw err;
-  }
-}
-
-/**
- * Simulate realistic progress updates while the backend works.
- * Returns a `stop` function to cancel the simulation.
- */
-function simulateProgress(
-  estimatedSeconds: number,
-  onProgress?: ProgressCallback,
-): { stop: () => void } {
-  let cancelled = false;
-  const totalMs = estimatedSeconds * 1000;
-
-  const steps = [
-    { at: 0.00, pct: 5,  msg: 'Sending request…' },
-    { at: 0.05, pct: 10, msg: 'Analyzing text…' },
-    { at: 0.15, pct: 20, msg: 'Splitting into chunks…' },
-    { at: 0.25, pct: 35, msg: 'Generating audio…' },
-    { at: 0.45, pct: 50, msg: 'Still generating…' },
-    { at: 0.60, pct: 65, msg: 'Processing chunks…' },
-    { at: 0.75, pct: 78, msg: 'Merging audio…' },
-    { at: 0.88, pct: 88, msg: 'Almost done…' },
-    { at: 0.95, pct: 93, msg: 'Finalizing…' },
-  ];
-
-  const timers: ReturnType<typeof setTimeout>[] = [];
-
-  for (const step of steps) {
-    const timer = setTimeout(() => {
-      if (!cancelled) onProgress?.(step.pct, step.msg);
-    }, step.at * totalMs);
-    timers.push(timer);
   }
 
-  return {
-    stop: () => {
-      cancelled = true;
-      timers.forEach(clearTimeout);
-    },
-  };
+  if (!audioBase64) {
+    throw new Error('TTS generation failed to produce audio payload');
+  }
+
+  // Convert base64 to Uint8Array and Blob
+  const binary = atob(audioBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  onProgress?.(100, 'Done!');
+  return new Blob([bytes], { type: 'audio/mpeg' });
 }
+
