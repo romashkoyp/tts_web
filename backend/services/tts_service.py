@@ -214,7 +214,7 @@ def split_text_into_chunks(
     paragraphs = re.split(r"\n\s*\n", text.replace("\r\n", "\n"))
     sentences: list[str] = []
     for para in paragraphs:
-        para_clean = " ".join(para.split())
+        para_clean = para.strip()
         if para_clean:
             sentences.extend(split_sentences(para_clean))
 

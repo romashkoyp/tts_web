@@ -77,6 +77,12 @@ class TestSplitTextIntoChunks:
         assert chunks[0] == "First paragraph sentence."
         assert chunks[1] == "Second paragraph sentence."
 
+    def test_preserves_single_newlines(self):
+        text = "Line one\nLine two"
+        chunks = split_text_into_chunks(text, max_words=100)
+        assert len(chunks) == 1
+        assert chunks[0] == "Line one\nLine two"
+
     def test_splits_oversized_sentence_by_clauses(self):
         text = "This is clause one, and this is clause two, while this is clause three."
         # Limit to 5 words per chunk, so clauses will be grouped/split

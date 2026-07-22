@@ -148,7 +148,7 @@ def split_text_into_chunks(text: str, max_words: int = MAX_WORDS_PER_FILE) -> li
     paragraphs = re.split(r'\n\s*\n', text.replace('\r\n', '\n'))
     sentences = []
     for para in paragraphs:
-        para = ' '.join(para.split())
+        para = para.strip()
         if para:
             sentences.extend(split_sentences(para))
 
