@@ -8,7 +8,9 @@ import re
 import asyncio
 import os
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import random
+import time
+from typing import Callable, Any
 
 import edge_tts
 from langdetect import detect, LangDetectException
@@ -22,8 +24,8 @@ WORDS_PER_MINUTE = 150
 MAX_WORDS_PER_CHUNK = WORDS_PER_MINUTE * 8  # ~1200 words per chunk
 MIN_FILE_SIZE = 1024  # bytes — valid MP3 is at least ~1 KB
 
-MAX_WORKERS = 20
-MAX_RETRIES = 3
+MAX_WORKERS = 10  # Optimal async concurrency for Edge TTS WebSockets (8-12)
+MAX_RETRIES = 4
 
 # Mapping from langdetect 2-letter codes to common edge-tts locale prefixes.
 LANGUAGE_TO_LOCALE: dict[str, str] = {
@@ -105,6 +107,19 @@ LANGUAGE_TO_LOCALE: dict[str, str] = {
 def is_valid_chunk(filepath: str) -> bool:
     """Check that an MP3 file exists and is not empty/corrupted (>= 1 KB)."""
     return os.path.isfile(filepath) and os.path.getsize(filepath) >= MIN_FILE_SIZE
+
+
+def safe_remove(filepath: str) -> None:
+    """Safely remove a file, tolerating transient locks."""
+    for _ in range(3):
+        try:
+            if os.path.lexists(filepath):
+                os.remove(filepath)
+            return
+        except PermissionError:
+            time.sleep(0.02)
+        except OSError:
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +261,7 @@ def split_text_into_chunks(
 
 
 # ---------------------------------------------------------------------------
-# TTS generation
+# TTS generation (Pure Native Async)
 # ---------------------------------------------------------------------------
 
 async def _generate_chunk(
@@ -255,48 +270,56 @@ async def _generate_chunk(
     voice: str,
     output_dir: str,
     total_chunks: int,
+    semaphore: asyncio.Semaphore,
+    on_chunk_done: Callable[[], None] | None = None,
 ) -> str:
-    """Generate a single chunk MP3 with retry and validation."""
-    output_path = os.path.join(output_dir, f"chunk_{index:04d}.mp3")
-    last_error = None
+    """Generate a single chunk MP3 using atomic writes and jittered backoff."""
+    final_path = os.path.join(output_dir, f"chunk_{index:04d}.mp3")
+    tmp_path = os.path.join(output_dir, f"chunk_{index:04d}.mp3.tmp")
+    last_error: Exception | None = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            logger.info(
-                "Generating chunk %d/%d (Attempt %d/%d) …",
-                index + 1,
-                total_chunks,
-                attempt,
-                MAX_RETRIES,
-            )
-
-            communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(output_path)
-
-            if is_valid_chunk(output_path):
-                logger.info("Chunk %d/%d saved: %s", index + 1, total_chunks, output_path)
-                return output_path
-
-            size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
-            raise RuntimeError(f"Output file too small ({size} bytes)")
-
-        except Exception as exc:
-            last_error = exc
-            if os.path.isfile(output_path):
-                try:
-                    os.remove(output_path)
-                except OSError:
-                    pass
-            if attempt < MAX_RETRIES:
-                wait_time = 2**attempt
-                logger.warning(
-                    "Error generating chunk %d/%d: %s. Retrying in %ds…",
+    async with semaphore:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                logger.info(
+                    "Generating chunk %d/%d (Attempt %d/%d) …",
                     index + 1,
                     total_chunks,
-                    str(exc),
-                    wait_time,
+                    attempt,
+                    MAX_RETRIES,
                 )
-                await asyncio.sleep(wait_time)
+
+                communicate = edge_tts.Communicate(text, voice)
+                await communicate.save(tmp_path)
+
+                if is_valid_chunk(tmp_path):
+                    # Atomic rename guarantees no partially-written chunks are ever read
+                    os.replace(tmp_path, final_path)
+                    logger.info("Chunk %d/%d saved: %s", index + 1, total_chunks, final_path)
+                    if on_chunk_done:
+                        on_chunk_done()
+                    return final_path
+
+                size = os.path.getsize(tmp_path) if os.path.isfile(tmp_path) else 0
+                raise RuntimeError(f"Output file too small ({size} bytes)")
+
+            except asyncio.CancelledError:
+                safe_remove(tmp_path)
+                raise
+
+            except Exception as exc:
+                last_error = exc
+                safe_remove(tmp_path)
+                if attempt < MAX_RETRIES:
+                    backoff = (2 ** attempt) + random.uniform(0.15, 1.5)
+                    logger.warning(
+                        "Error generating chunk %d/%d: %s. Retrying in %.2fs…",
+                        index + 1,
+                        total_chunks,
+                        str(exc),
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
 
     logger.error(
         "Failed to generate chunk %d/%d after %d attempts: %s",
@@ -310,21 +333,6 @@ async def _generate_chunk(
     )
 
 
-def _run_chunk_sync(
-    index: int,
-    text: str,
-    voice: str,
-    output_dir: str,
-    total_chunks: int,
-) -> str:
-    """Thread-safe wrapper: creates a fresh event loop per thread."""
-    return asyncio.run(
-        _generate_chunk(index, text, voice, output_dir, total_chunks)
-    )
-
-
-from typing import Callable, Any
-
 async def process_text_to_speech(
     text: str,
     voice: str,
@@ -334,7 +342,7 @@ async def process_text_to_speech(
     """
     Full TTS pipeline:
       1. Split *text* into chunks.
-      2. Generate audio for each chunk concurrently using a thread pool.
+      2. Generate audio for each chunk concurrently using native asyncio tasks & Semaphore.
       3. Report real-time progress via *on_progress(percent, status)* if provided.
       4. Return ordered list of chunk file paths.
     """
@@ -347,33 +355,40 @@ async def process_text_to_speech(
         on_progress(10, f"Split text into {total} chunk(s)")
 
     completed = 0
-    loop = asyncio.get_running_loop()
+    workers = min(MAX_WORKERS, total)
+    semaphore = asyncio.Semaphore(workers)
 
-    def _done_callback(fut: asyncio.Future) -> None:
+    def on_chunk_done() -> None:
         nonlocal completed
         completed += 1
         if on_progress:
             pct = 10 + int((completed / total) * 80)
             on_progress(pct, f"Generating audio ({completed}/{total} chunks)")
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = []
-        for i in range(total):
-            fut = loop.run_in_executor(
-                executor,
-                _run_chunk_sync,
-                i,
-                chunks[i],
-                voice,
-                temp_dir,
-                total,
+    tasks = [
+        asyncio.create_task(
+            _generate_chunk(
+                index=i,
+                text=chunks[i],
+                voice=voice,
+                output_dir=temp_dir,
+                total_chunks=total,
+                semaphore=semaphore,
+                on_chunk_done=on_chunk_done,
             )
-            if on_progress:
-                fut.add_done_callback(_done_callback)
-            futures.append(fut)
+        )
+        for i in range(total)
+    ]
 
-        paths = await asyncio.gather(*futures)
+    try:
+        paths = await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     return list(paths)
+
 
 

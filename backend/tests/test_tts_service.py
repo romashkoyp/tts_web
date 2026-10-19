@@ -4,13 +4,18 @@ Unit tests for tts_service — text chunking, chunk validation, and language det
 These tests do NOT make network calls; they test pure logic only.
 """
 
+import asyncio
 import os
 import tempfile
+from unittest.mock import patch, MagicMock
 import pytest
 from services.tts_service import (
     split_text_into_chunks,
     detect_language,
     is_valid_chunk,
+    safe_remove,
+    _generate_chunk,
+    process_text_to_speech,
     MIN_FILE_SIZE,
 )
 
@@ -144,4 +149,127 @@ class TestDetectLanguage:
             assert isinstance(result, str)
         except ValueError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# safe_remove
+# ---------------------------------------------------------------------------
+
+class TestSafeRemove:
+    """Tests for safe_remove helper."""
+
+    def test_safe_remove_existing_file(self):
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"data")
+            path = f.name
+        assert os.path.exists(path)
+        safe_remove(path)
+        assert not os.path.exists(path)
+
+    def test_safe_remove_nonexistent_file(self):
+        # Should not raise exception
+        safe_remove("nonexistent_file_12345.mp3")
+
+
+# ---------------------------------------------------------------------------
+# _generate_chunk & process_text_to_speech (Native Async & Atomic Writes)
+# ---------------------------------------------------------------------------
+
+class TestGenerateChunkAndPipeline:
+    """Tests for native async generation and atomic write safety."""
+
+    @pytest.mark.asyncio
+    async def test_generate_chunk_atomic_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            semaphore = asyncio.Semaphore(2)
+
+            async def mock_save(path: str):
+                with open(path, "wb") as f:
+                    f.write(b"a" * (MIN_FILE_SIZE + 50))
+
+            with patch("edge_tts.Communicate") as mock_comm_cls:
+                instance = MagicMock()
+                instance.save = mock_save
+                mock_comm_cls.return_value = instance
+
+                done_called = False
+                def on_done():
+                    nonlocal done_called
+                    done_called = True
+
+                result_path = await _generate_chunk(
+                    index=0,
+                    text="Hello test chunk",
+                    voice="en-US-GuyNeural",
+                    output_dir=temp_dir,
+                    total_chunks=1,
+                    semaphore=semaphore,
+                    on_chunk_done=on_done,
+                )
+
+                assert result_path.endswith("chunk_0000.mp3")
+                assert os.path.isfile(result_path)
+                assert not os.path.isfile(result_path + ".tmp")
+                assert done_called is True
+
+    @pytest.mark.asyncio
+    async def test_generate_chunk_cleans_tmp_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            semaphore = asyncio.Semaphore(1)
+
+            async def mock_save_too_small(path: str):
+                with open(path, "wb") as f:
+                    f.write(b"too small")
+
+            with patch("edge_tts.Communicate") as mock_comm_cls, \
+                 patch("services.tts_service.MAX_RETRIES", 1):
+                instance = MagicMock()
+                instance.save = mock_save_too_small
+                mock_comm_cls.return_value = instance
+
+                with pytest.raises(RuntimeError, match="failed after 1 attempts"):
+                    await _generate_chunk(
+                        index=0,
+                        text="Fail chunk",
+                        voice="en-US-GuyNeural",
+                        output_dir=temp_dir,
+                        total_chunks=1,
+                        semaphore=semaphore,
+                    )
+
+                tmp_path = os.path.join(temp_dir, "chunk_0000.mp3.tmp")
+                final_path = os.path.join(temp_dir, "chunk_0000.mp3")
+                assert not os.path.exists(tmp_path)
+                assert not os.path.exists(final_path)
+
+    @pytest.mark.asyncio
+    async def test_process_text_to_speech_full_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            async def mock_save(path: str):
+                with open(path, "wb") as f:
+                    f.write(b"a" * (MIN_FILE_SIZE + 50))
+
+            with patch("edge_tts.Communicate") as mock_comm_cls:
+                instance = MagicMock()
+                instance.save = mock_save
+                mock_comm_cls.return_value = instance
+
+                progress_calls = []
+                def on_progress(pct: int, status: str):
+                    progress_calls.append((pct, status))
+
+                paths = await process_text_to_speech(
+                    text="First sentence here. Second sentence here.",
+                    voice="en-US-GuyNeural",
+                    temp_dir=temp_dir,
+                    on_progress=on_progress,
+                )
+
+                assert len(paths) >= 1
+                for p in paths:
+                    assert os.path.isfile(p)
+                    assert p.endswith(".mp3")
+                    assert not os.path.exists(p + ".tmp")
+                assert len(progress_calls) >= 2
+
 

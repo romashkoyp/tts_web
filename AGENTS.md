@@ -42,10 +42,10 @@
 ## 3. GUI & Concurrency Conventions
 - **UI Definition Style:** Declarative TSX (React 19) components with responsive, modular vanilla CSS (`App.css`, `index.css`, and component `.css` files).
 - **Main Thread / Event Loop Rule:**
-  - **Backend Event Loop:** Never block FastAPI's `asyncio` event loop with synchronous file I/O, heavy chunking, or blocking network calls. `edge-tts` generation runs concurrently inside a `ThreadPoolExecutor(max_workers=20)` wrapped via `loop.run_in_executor()`.
+  - **Backend Event Loop:** Never block FastAPI's `asyncio` event loop with synchronous file I/O or heavy operations. `edge-tts` generation runs natively on the event loop as concurrent async tasks regulated by `asyncio.Semaphore(max_workers=10)`.
   - **Frontend UI Thread:** The browser UI remains responsive during generation by processing streaming server responses asynchronously via `ReadableStreamDefaultReader` on the NDJSON stream without freezing UI paint cycles.
 - **Concurrency & Signals / Event Streaming:**
-  - **Backend Pipeline Concurrency:** `asyncio.Queue` bridges chunk generation workers to the HTTP response stream. Each worker executes with exponential backoff retries (`MAX_RETRIES = 3`, 2-second base backoff).
+  - **Backend Pipeline Concurrency:** `asyncio.Queue` bridges chunk generation workers to the HTTP response stream. Each worker executes with atomic file writes (.tmp -> replace) and randomized jitter exponential backoff retries (`MAX_RETRIES = 4`).
   - **Real-Time Event Streaming:** `POST /api/tts` returns a `StreamingResponse` (`application/x-ndjson`). Real-time progress events (`{"type": "progress", "percent": N, "status": "..."}`) stream incrementally to the client, concluding with a final completion event containing the base64-encoded audio payload (`{"type": "complete", "audio_base64": "..."}`).
 - **Styling & Theming:** Custom modern dark theme featuring glassmorphism accents, vibrant gradient highlights, accessible typography, and smooth CSS keyframe transitions for progress indicators and inputs.
 - **Resource & Temp File Paths:**
