@@ -273,3 +273,40 @@ class TestGenerateChunkAndPipeline:
                 assert len(progress_calls) >= 2
 
 
+class TestVoicesCache:
+    """Tests for in-memory TTL voice caching."""
+
+    @pytest.mark.asyncio
+    async def test_get_voices_uses_cache(self):
+        from unittest.mock import AsyncMock
+        import services.tts_service as tts_mod
+
+        mock_voices = [
+            {"ShortName": "en-US-GuyNeural", "Gender": "Male", "Locale": "en-US"},
+            {"ShortName": "en-US-JennyNeural", "Gender": "Female", "Locale": "en-US"},
+        ]
+        with patch("edge_tts.list_voices", new_callable=AsyncMock) as mock_list:
+            mock_list.return_value = mock_voices
+            tts_mod._voices_cache = None
+            tts_mod._voices_cache_timestamp = 0.0
+
+            res1 = await tts_mod.get_voices_for_language("en-US")
+            res2 = await tts_mod.get_voices_for_language("en-US")
+
+            assert len(res1) == 2
+            assert len(res2) == 2
+            mock_list.assert_called_once()
+
+
+class TestAbbreviationChunking:
+    """Tests that abbreviations with periods do not cause premature splits."""
+
+    def test_preserves_common_titles_and_abbreviations(self):
+        text = "Dr. Smith and Mr. Jones went to the lab. They met Prof. Miller there."
+        chunks = split_text_into_chunks(text, max_words=50)
+        assert len(chunks) == 1
+        assert "Dr. Smith" in chunks[0]
+        assert "Mr. Jones" in chunks[0]
+        assert "Prof. Miller" in chunks[0]
+
+

@@ -4,28 +4,77 @@ TTS Service — text chunking, edge-tts orchestration, language detection, voice
 Adapted from audiobook.py.
 """
 
-import re
 import asyncio
-import os
 import logging
+import os
 import random
+import re
 import time
-from typing import Callable, Any
+from typing import Any, Callable
 
 import edge_tts
-from langdetect import detect, LangDetectException
+from langdetect import DetectorFactory, LangDetectException, detect
+
+# Ensure deterministic language detection across requests
+DetectorFactory.seed = 0
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants & Configuration
 # ---------------------------------------------------------------------------
 WORDS_PER_MINUTE = 150
-MAX_WORDS_PER_CHUNK = WORDS_PER_MINUTE * 8  # ~1200 words per chunk
+# ~350 words (~2.3 mins of audio) balances parallel speedup, fast progress updates,
+# and low retry cost without excessive WebSocket connection overhead.
+MAX_WORDS_PER_CHUNK = int(os.getenv("MAX_WORDS_PER_CHUNK", "350"))
 MIN_FILE_SIZE = 1024  # bytes — valid MP3 is at least ~1 KB
 
-MAX_WORKERS = 10  # Optimal async concurrency for Edge TTS WebSockets (8-12)
+# Concurrency controls:
+# GLOBAL_MAX_WORKERS caps total simultaneous WebSockets to Microsoft across ALL users.
+# PER_REQUEST_MAX_WORKERS prevents a single user from starving other concurrent users.
+GLOBAL_MAX_WORKERS = int(os.getenv("GLOBAL_MAX_TTS_WORKERS", "12"))
+PER_REQUEST_MAX_WORKERS = int(os.getenv("PER_REQUEST_MAX_TTS_WORKERS", "6"))
 MAX_RETRIES = 4
+
+# Maximum characters needed for statistically reliable language identification
+LANG_DETECT_SAMPLE_CHARS = 1000
+
+# Pre-compiled regular expressions for text chunking
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n")
+_SENTENCE_SPLIT_RE = re.compile(
+    r"(?<!\bMr)(?<!\bMs)(?<!\bDr)(?<!\bSt)(?<!\bProf)(?<!\bMrs)"
+    r"(?<=[.!?\u2026])\s+(?=[^\s\da-z])"
+)
+_CLAUSE_SPLIT_RE = re.compile(r"(?<=[;,])\s+|\s+(?=[—–]\s)")
+
+# Global concurrency semaphore across all requests
+_GLOBAL_SEMAPHORE: asyncio.Semaphore | None = None
+_GLOBAL_SEMAPHORE_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _get_global_semaphore() -> asyncio.Semaphore:
+    """Lazily initialize the global semaphore on the active event loop."""
+    global _GLOBAL_SEMAPHORE, _GLOBAL_SEMAPHORE_LOOP
+    current_loop = asyncio.get_running_loop()
+    if _GLOBAL_SEMAPHORE is None or _GLOBAL_SEMAPHORE_LOOP is not current_loop:
+        _GLOBAL_SEMAPHORE = asyncio.Semaphore(GLOBAL_MAX_WORKERS)
+        _GLOBAL_SEMAPHORE_LOOP = current_loop
+    return _GLOBAL_SEMAPHORE
+
+
+# Voice list in-memory TTL cache (prevents redundant Microsoft API calls)
+VOICE_CACHE_TTL_SECONDS = 3600.0  # 1 hour
+_voices_cache: list[dict[str, Any]] | None = None
+_voices_cache_timestamp: float = 0.0
+_voices_cache_lock: asyncio.Lock | None = None
+
+
+def _get_voices_lock() -> asyncio.Lock:
+    global _voices_cache_lock
+    if _voices_cache_lock is None:
+        _voices_cache_lock = asyncio.Lock()
+    return _voices_cache_lock
+
 
 # Mapping from langdetect 2-letter codes to common edge-tts locale prefixes.
 LANGUAGE_TO_LOCALE: dict[str, str] = {
@@ -106,11 +155,27 @@ LANGUAGE_TO_LOCALE: dict[str, str] = {
 
 def is_valid_chunk(filepath: str) -> bool:
     """Check that an MP3 file exists and is not empty/corrupted (>= 1 KB)."""
-    return os.path.isfile(filepath) and os.path.getsize(filepath) >= MIN_FILE_SIZE
+    try:
+        return os.path.isfile(filepath) and os.path.getsize(filepath) >= MIN_FILE_SIZE
+    except OSError:
+        return False
+
+
+async def async_safe_remove(filepath: str) -> None:
+    """Non-blocking file removal with async retry for transient OS file locks."""
+    for _ in range(3):
+        try:
+            if os.path.lexists(filepath):
+                await asyncio.to_thread(os.remove, filepath)
+            return
+        except PermissionError:
+            await asyncio.sleep(0.02)
+        except OSError:
+            return
 
 
 def safe_remove(filepath: str) -> None:
-    """Safely remove a file, tolerating transient locks."""
+    """Safely remove a file synchronously, tolerating transient locks (for test compat)."""
     for _ in range(3):
         try:
             if os.path.lexists(filepath):
@@ -129,12 +194,23 @@ def safe_remove(filepath: str) -> None:
 def detect_language(text: str) -> str:
     """
     Detect the language of *text* and return the best-matching edge-tts locale
-    code (e.g. "en-US").
+    code (e.g. 'en-US'). Samples the first 1,000 characters to prevent high CPU overhead.
 
     Raises ValueError if detection fails.
     """
+    stripped = text.strip() if text else ""
+    if not stripped:
+        raise ValueError("Could not detect language: text is empty")
+
+    # Slice up to LANG_DETECT_SAMPLE_CHARS at a whitespace boundary to avoid scanning 46 KB
+    sample = stripped[:LANG_DETECT_SAMPLE_CHARS]
+    if len(stripped) > LANG_DETECT_SAMPLE_CHARS:
+        last_space = sample.rfind(" ")
+        if last_space > LANG_DETECT_SAMPLE_CHARS // 2:
+            sample = sample[:last_space]
+
     try:
-        lang_code = detect(text).lower()
+        lang_code = detect(sample).lower()
     except LangDetectException as exc:
         raise ValueError(f"Could not detect language: {exc}") from exc
 
@@ -154,17 +230,34 @@ def detect_language(text: str) -> str:
 # Voice listing
 # ---------------------------------------------------------------------------
 
+async def _fetch_all_voices_cached() -> list[dict[str, Any]]:
+    """Return cached edge-tts voice list, refreshing only when TTL expires."""
+    global _voices_cache, _voices_cache_timestamp
+    now = time.monotonic()
+
+    if _voices_cache is not None and (now - _voices_cache_timestamp) < VOICE_CACHE_TTL_SECONDS:
+        return _voices_cache
+
+    async with _get_voices_lock():
+        now = time.monotonic()
+        if _voices_cache is not None and (now - _voices_cache_timestamp) < VOICE_CACHE_TTL_SECONDS:
+            return _voices_cache
+
+        all_voices = await edge_tts.list_voices()
+        _voices_cache = all_voices
+        _voices_cache_timestamp = time.monotonic()
+        logger.info("Refreshed edge-tts voice cache (%d voices)", len(all_voices))
+        return _voices_cache
+
+
 async def get_voices_for_language(language: str) -> list[dict]:
     """
-    Return available edge-tts voices for a given language code.
+    Return available edge-tts voices for a given language code using cached voice list.
     """
-    all_voices = await edge_tts.list_voices()
+    all_voices = await _fetch_all_voices_cached()
 
     lang_lower = language.lower()
-    if len(lang_lower) == 2:
-        prefix = f"{lang_lower}-"
-    else:
-        prefix = lang_lower
+    prefix = f"{lang_lower}-" if len(lang_lower) == 2 else lang_lower
 
     matched: list[dict] = []
     for voice in all_voices:
@@ -193,7 +286,7 @@ def split_text_into_chunks(
 
     Universal split hierarchy:
       1. Paragraph breaks (double newlines)
-      2. Sentence endings (.!?...) followed by uppercase / quote / dash / bracket
+      2. Sentence endings (.!?...) avoiding abbreviation lookbehinds
       3. Clause boundaries (; , — –) for oversized sentences
       4. Word boundaries (last resort)
     """
@@ -205,11 +298,11 @@ def split_text_into_chunks(
 
     def split_sentences(paragraph: str) -> list[str]:
         p = paragraph.replace("...", "\u2026")
-        parts = re.split(r"(?<=[.!?\u2026])\s+(?=[^\s\da-z])", p)
+        parts = _SENTENCE_SPLIT_RE.split(p)
         return [s.strip() for s in parts if s.strip()]
 
     def split_oversized(sentence: str, limit: int) -> list[str]:
-        clauses = re.split(r"(?<=[;,])\s+|\s+(?=[—–]\s)", sentence)
+        clauses = _CLAUSE_SPLIT_RE.split(sentence)
         if len(clauses) > 1:
             parts, buf, n = [], [], 0
             for cl in clauses:
@@ -226,7 +319,7 @@ def split_text_into_chunks(
         words = sentence.split()
         return [" ".join(words[i : i + limit]) for i in range(0, len(words), limit)]
 
-    paragraphs = re.split(r"\n\s*\n", text.replace("\r\n", "\n"))
+    paragraphs = _PARAGRAPH_SPLIT_RE.split(text.replace("\r\n", "\n"))
     sentences: list[str] = []
     for para in paragraphs:
         para_clean = para.strip()
@@ -261,7 +354,7 @@ def split_text_into_chunks(
 
 
 # ---------------------------------------------------------------------------
-# TTS generation (Pure Native Async)
+# TTS generation (Native Async with Dual Concurrency Control)
 # ---------------------------------------------------------------------------
 
 async def _generate_chunk(
@@ -270,17 +363,24 @@ async def _generate_chunk(
     voice: str,
     output_dir: str,
     total_chunks: int,
-    semaphore: asyncio.Semaphore,
+    semaphore: asyncio.Semaphore | None = None,
+    request_semaphore: asyncio.Semaphore | None = None,
+    global_semaphore: asyncio.Semaphore | None = None,
     on_chunk_done: Callable[[], None] | None = None,
 ) -> str:
-    """Generate a single chunk MP3 using atomic writes and jittered backoff."""
+    """Generate a single chunk MP3 using atomic writes, jittered backoff, and release during sleep."""
     final_path = os.path.join(output_dir, f"chunk_{index:04d}.mp3")
     tmp_path = os.path.join(output_dir, f"chunk_{index:04d}.mp3.tmp")
     last_error: Exception | None = None
 
-    async with semaphore:
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
+    req_sem = request_semaphore or semaphore or asyncio.Semaphore(1)
+    glob_sem = global_semaphore or _get_global_semaphore()
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            # Acquire semaphores ONLY during active network synthesis.
+            # Releasing before backoff sleep prevents starving healthy chunks.
+            async with req_sem, glob_sem:
                 logger.info(
                     "Generating chunk %d/%d (Attempt %d/%d) …",
                     index + 1,
@@ -292,34 +392,39 @@ async def _generate_chunk(
                 communicate = edge_tts.Communicate(text, voice)
                 await communicate.save(tmp_path)
 
-                if is_valid_chunk(tmp_path):
-                    # Atomic rename guarantees no partially-written chunks are ever read
-                    os.replace(tmp_path, final_path)
+                valid = await asyncio.to_thread(is_valid_chunk, tmp_path)
+                if valid:
+                    await asyncio.to_thread(os.replace, tmp_path, final_path)
                     logger.info("Chunk %d/%d saved: %s", index + 1, total_chunks, final_path)
                     if on_chunk_done:
                         on_chunk_done()
                     return final_path
 
-                size = os.path.getsize(tmp_path) if os.path.isfile(tmp_path) else 0
+                size = (
+                    await asyncio.to_thread(os.path.getsize, tmp_path)
+                    if await asyncio.to_thread(os.path.isfile, tmp_path)
+                    else 0
+                )
                 raise RuntimeError(f"Output file too small ({size} bytes)")
 
-            except asyncio.CancelledError:
-                safe_remove(tmp_path)
-                raise
+        except asyncio.CancelledError:
+            await async_safe_remove(tmp_path)
+            raise
 
-            except Exception as exc:
-                last_error = exc
-                safe_remove(tmp_path)
-                if attempt < MAX_RETRIES:
-                    backoff = (2 ** attempt) + random.uniform(0.15, 1.5)
-                    logger.warning(
-                        "Error generating chunk %d/%d: %s. Retrying in %.2fs…",
-                        index + 1,
-                        total_chunks,
-                        str(exc),
-                        backoff,
-                    )
-                    await asyncio.sleep(backoff)
+        except Exception as exc:
+            last_error = exc
+            await async_safe_remove(tmp_path)
+            if attempt < MAX_RETRIES:
+                backoff = (2 ** attempt) + random.uniform(0.15, 1.5)
+                logger.warning(
+                    "Error generating chunk %d/%d: %s. Retrying in %.2fs…",
+                    index + 1,
+                    total_chunks,
+                    str(exc),
+                    backoff,
+                )
+                # Sleep OUTSIDE semaphore contexts so other tasks can proceed
+                await asyncio.sleep(backoff)
 
     logger.error(
         "Failed to generate chunk %d/%d after %d attempts: %s",
@@ -341,12 +446,13 @@ async def process_text_to_speech(
 ) -> list[str]:
     """
     Full TTS pipeline:
-      1. Split *text* into chunks.
-      2. Generate audio for each chunk concurrently using native asyncio tasks & Semaphore.
-      3. Report real-time progress via *on_progress(percent, status)* if provided.
-      4. Return ordered list of chunk file paths.
+      1. Split *text* into chunks asynchronously.
+      2. Generate audio concurrently with per-request and global throttling.
+      3. Cancel all sibling tasks immediately if any chunk fails permanently or pipeline is aborted.
+      4. Report real-time progress via *on_progress(percent, status)*.
+      5. Return ordered list of chunk file paths.
     """
-    chunks = split_text_into_chunks(text)
+    chunks = await asyncio.to_thread(split_text_into_chunks, text)
     if not chunks:
         raise ValueError("No processable text after splitting")
 
@@ -355,8 +461,9 @@ async def process_text_to_speech(
         on_progress(10, f"Split text into {total} chunk(s)")
 
     completed = 0
-    workers = min(MAX_WORKERS, total)
-    semaphore = asyncio.Semaphore(workers)
+    workers = min(PER_REQUEST_MAX_WORKERS, total)
+    request_semaphore = asyncio.Semaphore(workers)
+    global_semaphore = _get_global_semaphore()
 
     def on_chunk_done() -> None:
         nonlocal completed
@@ -373,7 +480,8 @@ async def process_text_to_speech(
                 voice=voice,
                 output_dir=temp_dir,
                 total_chunks=total,
-                semaphore=semaphore,
+                request_semaphore=request_semaphore,
+                global_semaphore=global_semaphore,
                 on_chunk_done=on_chunk_done,
             )
         )
@@ -382,13 +490,12 @@ async def process_text_to_speech(
 
     try:
         paths = await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
+    except BaseException:
+        # Cancel ALL sibling tasks on CancelledError OR any chunk failure (BaseException)
         for t in tasks:
-            t.cancel()
+            if not t.done():
+                t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
     return list(paths)
-
-
-

@@ -58,3 +58,14 @@ def test_tts_streams_ndjson_events(mock_process, mock_merge) -> None:
     assert len(complete_events) == 1
     assert complete_events[0]["audio_base64"] == "ZmFrZV9tcDNfZGF0YQ=="  # base64("fake_mp3_data")
 
+
+def test_detect_language_rejects_oversized_payload() -> None:
+    """POST /api/detect-language rejects text larger than MAX_TEXT_BYTES."""
+    oversized = "a" * (MAX_TEXT_BYTES + 1)
+    response = client.post(
+        "/api/detect-language",
+        json={"text": oversized},
+    )
+    assert response.status_code == 400
+    assert "Text exceeds maximum allowed size" in response.json()["detail"]
+

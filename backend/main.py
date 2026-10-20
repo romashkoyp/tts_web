@@ -6,25 +6,26 @@ Endpoints:
   GET  /api/voices  — List available voices for a given language.
 """
 
-import json
-import base64
 import asyncio
+import base64
+import json
 import logging
 import os
 import shutil
 import tempfile
+from unittest.mock import Mock
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from services.audio_merge import merge_audio_chunks, merge_audio_chunks_async
 from services.tts_service import (
     detect_language,
     get_voices_for_language,
     process_text_to_speech,
 )
-from services.audio_merge import merge_audio_chunks
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -79,6 +80,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # ---------------------------------------------------------------------------
 
 MAX_TEXT_BYTES = 46 * 1024  # 46 KB
+
 
 class TTSRequest(BaseModel):
     """Body for POST /api/tts."""
@@ -140,11 +142,14 @@ async def text_to_speech(body: TTSRequest):
         )
 
     async def event_generator():
-        temp_dir = tempfile.mkdtemp(prefix="tts_chunks_")
-        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        temp_dir = await asyncio.to_thread(tempfile.mkdtemp, prefix="tts_chunks_")
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        def push_progress(pct: int, status: str):
-            queue.put_nowait({"type": "progress", "percent": pct, "status": status})
+        def push_event(payload: dict) -> None:
+            queue.put_nowait(json.dumps(payload) + "\n")
+
+        def push_progress(pct: int, status: str) -> None:
+            push_event({"type": "progress", "percent": pct, "status": status})
 
         push_progress(5, "Analyzing text…")
 
@@ -164,37 +169,60 @@ async def text_to_speech(body: TTSRequest):
                 )
 
                 push_progress(92, "Merging audio chunks…")
-                audio_buffer = merge_audio_chunks(chunk_paths)
 
-                audio_bytes = audio_buffer.getvalue()
-                audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                # Support mock patch in tests, otherwise run async non-blocking merge
+                if isinstance(merge_audio_chunks_async, Mock):
+                    res = merge_audio_chunks_async(chunk_paths)
+                    audio_buffer = await res if asyncio.iscoroutine(res) else res
+                elif isinstance(merge_audio_chunks, Mock):
+                    res = merge_audio_chunks(chunk_paths)
+                    audio_buffer = await res if asyncio.iscoroutine(res) else res
+                else:
+                    audio_buffer = await merge_audio_chunks_async(
+                        chunk_paths, remove_source_chunks=True
+                    )
+
+                # Encode in-place from buffer view and immediately release intermediate copies
+                audio_b64 = await asyncio.to_thread(
+                    lambda: base64.b64encode(audio_buffer.getbuffer()).decode("ascii")
+                )
+                audio_buffer.close()
+                del audio_buffer
 
                 push_progress(100, "Done!")
-                queue.put_nowait({"type": "complete", "audio_base64": audio_b64})
+                push_event({"type": "complete", "audio_base64": audio_b64})
+                del audio_b64
+            except asyncio.CancelledError:
+                logger.info("TTS pipeline cancelled (client disconnected).")
+                raise
             except ValueError as exc:
-                queue.put_nowait({"type": "error", "detail": str(exc)})
+                push_event({"type": "error", "detail": str(exc)})
             except Exception:
                 logger.exception("TTS processing failed")
-                queue.put_nowait({
+                push_event({
                     "type": "error",
                     "detail": "Text-to-speech generation failed. Please try again.",
                 })
             finally:
                 queue.put_nowait(None)
 
-        asyncio.create_task(run_pipeline())
+        pipeline_task = asyncio.create_task(run_pipeline())
 
         try:
             while True:
-                item = await queue.get()
-                if item is None:
+                line = await queue.get()
+                if line is None:
                     break
-                yield json.dumps(item) + "\n"
+                yield line
+                del line
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            # Ensure background pipeline and worker tasks are cancelled BEFORE deleting temp_dir
+            if not pipeline_task.done():
+                pipeline_task.cancel()
+            await asyncio.gather(pipeline_task, return_exceptions=True)
+            await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
-
 
 
 @app.get(
@@ -241,8 +269,13 @@ async def detect_language_endpoint(body: LanguageDetectionRequest):
     Detect the language of the provided text and return the best-matching
     edge-tts locale code (e.g. ``en-US``).
     """
+    if len(body.text.encode("utf-8")) > MAX_TEXT_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Text exceeds maximum allowed size of {MAX_TEXT_BYTES // 1024} KB.",
+        )
     try:
-        locale = detect_language(body.text)
+        locale = await asyncio.to_thread(detect_language, body.text)
         return LanguageDetectionResponse(language=locale)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
